@@ -1,3 +1,8 @@
+(* TODO: Implement parse for keywords In, Like, ILike *)
+(* TODO: Maybe expand or implement cases like select * from ({select | name} join {select | name}) *)
+(* TODO: Implement the formating *)
+
+(* List *)
 let drop (n: int) (ls: 'a list): 'a list =
   let rec loop k l =
     if k > 0 then
@@ -373,12 +378,12 @@ let read_simple_ident (ctx: context_t): (context_t * string, unit) result =
             Ok (ctx', value)
         | _ -> Error ()
     end
-    | Some _ ->
+    | Some c when c == '_' || is_alpha c ->
       let ctx' = advance_while ctx' is_alnum in
       let value = current_substr ctx' in
         Ok (ctx', value)
-    | None ->
-        Error ()
+    | _ ->
+      Error ()
 
 let read_ident (ctx: context_t): (context_t * token_t, string) result =
   match read_simple_ident ctx with
@@ -392,7 +397,13 @@ let read_ident (ctx: context_t): (context_t * token_t, string) result =
         let token = make_token ctx (Identifier (value1 ^ "." ^ value2)) in
           Ok (ctx2, token)
       | Error _ ->
-        Error (Printf.sprintf "Expecting identifier at %s" (fmt_ctx_pos ctx))
+        match get_current_char_opt ctx2 with
+        | Some '*' -> 
+          let ctx2 = advance ctx2 in
+          let token = make_token ctx (Identifier (value1 ^ ".*")) in
+            Ok (ctx2, token)
+        | _ ->
+          Error (Printf.sprintf "Expecting identifier at %s" (fmt_ctx_pos ctx))
     )
     | _ ->
       let token = make_token ctx (Identifier value1) in
@@ -584,7 +595,6 @@ and join_stmt_t =
 and selectable_t =
   | Table of { name: string; alias: string option }
   | Subselect of { select: select_stmt_t; alias: string option }
-
 
 let parser_unexpected_token token msg =
   Error (Printf.sprintf "%sUnexpected token %s" msg (sprint_token token))
@@ -1037,7 +1047,7 @@ let rec print_select (s: select_stmt_t) (depth: int): unit =
   
 let () =
   (*let input = "select *, abc as nwa, x.y from restaurants as r inner join settings as s on restaurant_id = id where x + 1 order by x limit 12 offset 100;" in*)
-  let input = "select a, b, c from (select * from t) as k inner join (select x, y from fears) as f on k.id = f.id;"
+  let input = "select a.*, b, c from (select * from t) as k inner join (select x, y from fears) as f on k.id = f.id;"
   in
   let ctx =
     { data = input
@@ -1049,7 +1059,7 @@ let () =
   in
   match tokenize ctx with
   | Ok tokens -> (
-    (* List.iter print_token tokens; *)
+    (*List.iter print_token tokens;*)
     let parser' =
       { tokens = Array.of_list tokens
       ; token_count = List.length tokens
