@@ -415,6 +415,8 @@ let read_token (ctx: context_t): (context_t * token_t, string) result =
     | Some ',' -> Ok (advance ctx, make_token ctx Comma)
     | Some ';' -> Ok (advance ctx, make_token ctx Semi)
     | Some '=' -> Ok (advance ctx, make_token ctx Equal)
+    | Some '(' -> Ok (advance ctx, make_token ctx OpenParen)
+    | Some ')' -> Ok (advance ctx, make_token ctx CloseParen)
     | Some '>' -> begin
       match get_next_char ctx with
       | Some '=' -> Ok (advance_n ctx 2, make_token ctx Ge)
@@ -431,7 +433,9 @@ let read_token (ctx: context_t): (context_t * token_t, string) result =
       | _ ->
         Error (Printf.sprintf "Expecting symbol '=' after %s" (fmt_ctx_pos ctx))
     end
-    | Some _ -> Error "Unknown token type"
+    | Some v ->
+      Printf.printf "-- '%c' at %s" v (fmt_ctx_pos ctx);
+      Error "Unknown token type"
 
 let replace_keywords (tokens: token_t list): token_t list =
   let rec zip_lhs f xs ys =
@@ -909,63 +913,96 @@ let rec print_expr expr depth =
     print_expr binop.lhs (depth + 2);
     print_expr binop.rhs (depth + 2)
 
-let print_select (s: select_stmt_t): unit =
+let rec print_select (s: select_stmt_t) (depth: int): unit =
+  let depth_str = Printf.sprintf "%*s" depth ""
+  in
+
   (match s.table with
   | Table t -> (
     match t.alias with
     | Some alias ->
+      Printf.printf "%s" depth_str;
       Printf.printf "table: %s as %s\n" t.name alias
     | None ->
+      Printf.printf "%s" depth_str;
       Printf.printf "table: %s\n" t.name
   )
-  | _ -> 
-    failwith "Not implemented"
+  | Subselect s -> (
+    (match s.alias with
+    | Some alias ->
+      Printf.printf "%s" depth_str;
+      Printf.printf "from select as: %s\n" alias
+    | None ->
+      Printf.printf "%s" depth_str;
+      Printf.printf "from select without alias\n"
+    );
+    print_select s.select (depth + 2)
+  )
   );
 
+  Printf.printf "%s" depth_str;
   Printf.printf "fields:\n";
-    List.iter (
-      fun field ->
-        match field.alias with
-        | Some v ->
-          Printf.printf "  alias = %s:\n" v;
-          print_expr field.expr 4
-        | None ->
-          print_expr field.expr 2
-    )
-    s.fields;
+  List.iter (
+    fun field ->
+      match field.alias with
+      | Some v ->
+        Printf.printf "%s" depth_str;
+        Printf.printf "  alias = %s:\n" v;
+        print_expr field.expr (depth + 4)
+      | None ->
+        print_expr field.expr (depth + 2)
+  )
+  s.fields;
+
   List.iter (
     fun v ->
+      Printf.printf "%s" depth_str;
       Printf.printf "%s\n" (sprint_token_type (from_join_type v.join_type));
       (match v.table with
       | Table t -> (
         match t.alias with
         | Some alias ->
+          Printf.printf "%s" depth_str;
           Printf.printf "table: %s as %s\n" t.name alias
         | None ->
+          Printf.printf "%s" depth_str;
           Printf.printf "table: %s\n" t.name
       )
-      | _ -> 
-        failwith "Not implemented"
+      | Subselect s -> begin
+        (match s.alias with
+        | Some alias ->
+          Printf.printf "%s" depth_str;
+          Printf.printf "from select as: %s\n" alias
+        | None ->
+          Printf.printf "%s" depth_str;
+          Printf.printf "from select without alias\n"
+        );
+        print_select s.select (depth + 2)
+      end
       );
+      Printf.printf "%s" depth_str;
       Printf.printf " on\n";
-      print_expr v.condition 2
+      print_expr v.condition (depth + 2)
   )
   s.joins;
 
   (match s.where with
   | Some w ->
+    Printf.printf "%s" depth_str;
     Printf.printf "where:\n";
-    print_expr w.expr 2
+    print_expr w.expr (depth + 2)
   | None -> ()
   );
 
   (match s.order_by with
   | Some o ->
+    Printf.printf "%s" depth_str;
     Printf.printf "order by:\n";
     List.iter (
       fun item ->
+        Printf.printf "%s" depth_str;
         Printf.printf "  %s\n" (if item.ascending then "asc" else "desc");
-        print_expr item.expr 3
+        print_expr item.expr (depth + 3)
     )
     o.items
   | None -> ()
@@ -973,27 +1010,35 @@ let print_select (s: select_stmt_t): unit =
 
   (match s.group_by with
   | Some g -> (
+    Printf.printf "%s" depth_str;
     Printf.printf "group by: %s\n" (join ", " (fun a -> a) g.names);
     match g.having with
     | Some e ->
+      Printf.printf "%s" depth_str;
       Printf.printf "having:\n";
-      print_expr e 2
+      print_expr e (depth + 2)
     | None -> ()
   )
   | None -> ()
   );
 
   (match s.limit with
-  | Some l -> Printf.printf "limit: %s\n" (sprint_token_type l)
+  | Some l ->
+    Printf.printf "%s" depth_str;
+    Printf.printf "limit: %s\n" (sprint_token_type l)
   | None -> ()
   );
 
   match s.offset with
-  | Some o -> Printf.printf "offset: %s\n" (sprint_token_type o)
+  | Some o ->
+    Printf.printf "%s" depth_str;
+    Printf.printf "offset: %s\n" (sprint_token_type o)
   | None -> ()
   
 let () =
-  let input = "select *, abc as nwa, x.y from restaurants as r inner join settings as s on restaurant_id = id where x + 1 order by x limit 12 offset 100;" in
+  (*let input = "select *, abc as nwa, x.y from restaurants as r inner join settings as s on restaurant_id = id where x + 1 order by x limit 12 offset 100;" in*)
+  let input = "select a, b, c from (select * from t) as k inner join (select x, y from fears) as f on k.id = f.id;"
+  in
   let ctx =
     { data = input
     ; pos = 0
@@ -1015,7 +1060,7 @@ let () =
     | Error e -> Printf.printf "parse error %s\n" e
     | Ok (p, s) ->
       Printf.printf "parse ok\n";
-      print_select s
+      print_select s 0
   )
   | Error e -> Printf.printf "%s\n" e
 
