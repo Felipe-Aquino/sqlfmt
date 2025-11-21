@@ -10,6 +10,7 @@
 #include "darray.h"
 
 #define MIN(a, b) ((a) > (b) ? (b) : (a))
+#define MAX(a, b) ((a) < (b) ? (b) : (a))
 
 typedef struct StringView {
     const char *data;
@@ -40,6 +41,112 @@ StringView sv_read_while_alnum(StringView str);
 StringView sv_read_while_alpha(StringView str);
 StringView sv_read_while_number(StringView str);
 StringView sv_read_file(const char *filename);
+
+struct Error {
+    const char *data;
+    char error_msg[512];
+    int where_pos;
+};
+
+static struct Error error = {0};
+
+static void error_init(const char *data) {
+    error.data = data;
+}
+
+static void error_reset() {
+    error.where_pos = 0;
+    error.error_msg[0] = '\0';
+}
+
+// where contains the place in which the error happend, it just more convenient
+static void report_error(StringView where, const char *fmt, ...) {
+    assert(error.data != NULL);
+
+    error.where_pos = (long)(where.data - error.data);
+
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(error.error_msg, 512, fmt, ap);
+    va_end(ap);
+}
+
+static void report_append(const char *fmt, ...) {
+    assert(error.data != NULL);
+
+    int size = strlen(error.error_msg);
+
+    if (size >= 511) {
+        return;
+    }
+
+    int n = 512 - size;
+
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(error.error_msg + size, n, fmt, ap);
+    va_end(ap);
+}
+
+static void error_print() {
+    assert(error.data != NULL);
+
+    int data_size = strlen(error.data);
+
+    int i = 0;
+    int line = 1;
+    int column = 1;
+    int line_begin = 0;
+    int line_end = 0;
+
+    while (i < error.where_pos) {
+        char c = error.data[i];
+
+        if (c == '\0') {
+            break;
+        }
+
+        if (c == '\n') {
+            line += 1;
+            column = 0;
+            line_begin = i;
+        }
+
+        column += 1;
+        i += 1;
+    }
+
+    assert(i == error.where_pos);
+
+    line_end = i;
+
+    while (i < data_size) {
+        char c = error.data[i];
+
+        if (c == '\0' || c == '\n') {
+            break;
+        }
+
+        line_end += 1;
+        i += 1;
+    }
+
+    printf("%d:%d: %s\n", line, column, error.error_msg);
+
+    int start = MAX(0, line_begin + column - 8);
+    int end = MIN(line_end, error.where_pos + 8);
+    int size = end - start;
+
+    printf(" %.*s\n", size, (error.data + start));
+
+    while (start < column - 1) {
+        printf(" ");
+        start += 1;
+    }
+    printf(" ^\n");
+
+    printf("\nline_end: %d, pos: %d, data_size: %d\n", line_end, error.where_pos, data_size);
+}
 
 typedef enum TokenType {
     TT_EOF = 0,
@@ -182,7 +289,6 @@ typedef struct Token {
 typedef struct Tokenizer {
     StringView unchanged;
     StringView data;
-    char err_msg[128];
 } Tokenizer;
 
 Tokenizer tk_make(const char *text);
@@ -434,8 +540,8 @@ bool parse_expr(Parser *parser, Expr *expr) {
     Token token = parser->tokens[i];
 
     if (token.type == TT_EOF) {
-        printf("EXPR PARSER ERR: no more tokens\n");
-        return false;
+        report_error(token.name, "EXPR PARSER ERR: no more tokens\n");
+        return true;
     }
 
     expr->parentheses = false;
@@ -451,10 +557,10 @@ bool parse_expr(Parser *parser, Expr *expr) {
 
         Expr *lhs = parser_alloc(parser, (Expr){0});
 
-        if (!parse_expr(parser, lhs)) {
-            printf("EXPR PARSER ERR: operation without lhs(1)\n");
+        if (parse_expr(parser, lhs)) {
+            report_error(token.name, "EXPR PARSER ERR: operation without lhs(1)\n");
             parser->token_idx = saved;
-            return false;
+            return true;
         }
 
         expr->lhs = lhs;
@@ -464,22 +570,22 @@ bool parse_expr(Parser *parser, Expr *expr) {
         token = parser->tokens[i];
 
         if (token.type != TT_CLOSE_PAREN) {
-            printf("EXPR PARSER ERR: unmatched parentheses(1)\n");
-            return false;
+            report_error(token.name, "EXPR PARSER ERR: unmatched parentheses(1)\n");
+            return true;
         }
 
         token = parser->tokens[++i];
     }
 
     if (token.type == TT_EOF) {
-        printf("EXPR PARSER ERR: no more tokens(2)\n");
-        return false;
+        report_error(token.name, "EXPR PARSER ERR: no more tokens(2)\n");
+        return true;
     }
 
     if (!expr->parentheses) {
         if (!tt_isoneof(token.type, 3, TT_IDENTIFIER, TT_NUMBER, TT_STRING)) {
-            printf("EXPR PARSER ERR: expecting a value or identifier(1)\n");
-            return false;
+            report_error(token.name, "EXPR PARSER ERR: expecting a value or identifier(1)\n");
+            return true;
         }
 
         expr->token = token;
@@ -496,10 +602,10 @@ bool parse_expr(Parser *parser, Expr *expr) {
         
         Expr *rhs = parser_alloc(parser, (Expr){0});
 
-        if (!parse_expr(parser, rhs)) {
-            printf("EXPR PARSER ERR: operation without rhs(1)\n");
+        if (parse_expr(parser, rhs)) {
+            report_error(token.name, "EXPR PARSER ERR: operation without rhs(1)\n");
             parser->token_idx = saved;
-            return false;
+            return true;
         }
 
         expr->lhs = parser_alloc(parser, *expr);
@@ -515,7 +621,7 @@ bool parse_expr(Parser *parser, Expr *expr) {
 
     parser->token_idx = i;
 
-    return true;
+    return false;
 }
 
 bool parse_attrib_exprs(Parser *parser, AttribExpr *attr) {
@@ -523,8 +629,8 @@ bool parse_attrib_exprs(Parser *parser, AttribExpr *attr) {
     Token token = parser->tokens[start];
 
     if (token.type != TT_IDENTIFIER) {
-        printf("ATTRIB PARSE ERR: expecting identifier(1)\n");
-        return false;
+        report_error(token.name, "ATTRIB PARSE ERR: expecting identifier(1)\n");
+        return true;
     }
 
     attr->base.lhs = parser_alloc(parser, (Expr){0});
@@ -533,9 +639,9 @@ bool parse_attrib_exprs(Parser *parser, AttribExpr *attr) {
     token = parser->tokens[++parser->token_idx];
 
     if (!(token.type == TT_BOOL_OP && sv_equal(token.name, sv_make("=", 1)))) {
-        printf("ATTRIB PARSE ERR: expecting '='(1)\n");
+        report_error(token.name, "ATTRIB PARSE ERR: expecting '='(1)\n");
         parser->token_idx = start;
-        return false;
+        return true;
     }
 
     attr->base.token = token;
@@ -545,9 +651,9 @@ bool parse_attrib_exprs(Parser *parser, AttribExpr *attr) {
 
     attr->base.rhs = parser_alloc(parser, (Expr){0});
 
-    if (!parse_expr(parser, attr->base.rhs)) {
+    if (parse_expr(parser, attr->base.rhs)) {
         parser->token_idx = start;
-        return false;
+        return true;
     }
 
     // printf("---- %s: "SVFmt"\n", getTokenTypeStr(token.type), SVArg(token.name));
@@ -560,7 +666,7 @@ bool parse_attrib_exprs(Parser *parser, AttribExpr *attr) {
         return parse_attrib_exprs(parser, attr->next);
     }
 
-    return true;
+    return false;
 }
 
 bool parse_delete_stmt(Parser *parser) {
@@ -573,8 +679,8 @@ bool parse_delete_stmt(Parser *parser) {
     Token token = parser->tokens[++parser->token_idx];
 
     if (token.type != TT_IDENTIFIER) {
-        printf("DEL PARSER ERR: expecting identifier\n");
-        return false;
+        report_error(token.name, "DEL PARSER ERR: expecting identifier\n");
+        return true;
     }
 
     stmt->table_name = token;
@@ -587,12 +693,12 @@ bool parse_delete_stmt(Parser *parser) {
         }
 
         parser->stmt = (Stmt *)stmt;
-        return true;
+        return false;
     }
 
     if (token.type != TT_WHERE) {
-        printf("DEL PARSER ERR: expecting 'where' keyword\n");
-        return false;
+        report_error(token.name, "DEL PARSER ERR: expecting 'where' keyword\n");
+        return true;
     }
 
     parser->token_idx++;
@@ -602,8 +708,8 @@ bool parse_delete_stmt(Parser *parser) {
     // printf("where_expr: %p\n", stmt->where_expr);
     // printf("st type: %d\n", stmt->type);
 
-    if (!parse_expr(parser, stmt->where_expr)) {
-        return false;
+    if (parse_expr(parser, stmt->where_expr)) {
+        return true;
     }
 
     token = parser->tokens[parser->token_idx];
@@ -614,7 +720,7 @@ bool parse_delete_stmt(Parser *parser) {
     }
 
     parser->stmt = (Stmt *)stmt;
-    return true;
+    return false;
 }
 
 bool parse_update_stmt(Parser *parser) {
@@ -627,8 +733,8 @@ bool parse_update_stmt(Parser *parser) {
     Token token = parser->tokens[++parser->token_idx];
 
     if (token.type != TT_IDENTIFIER) {
-        printf("UPD PARSER ERR: expecting identifier\n");
-        return false;
+        report_error(token.name, "UPD PARSER ERR: expecting identifier\n");
+        return true;
     }
 
     stmt->table_name = token;
@@ -636,16 +742,16 @@ bool parse_update_stmt(Parser *parser) {
     token = parser->tokens[++parser->token_idx];
 
     if (token.type != TT_SET) {
-        printf("UPD PARSER ERR: expecting 'set' keyword\n");
-        return false;
+        report_error(token.name, "UPD PARSER ERR: expecting 'set' keyword\n");
+        return true;
     }
 
     token = parser->tokens[++parser->token_idx];
 
     stmt->attribs = parser_alloc(parser, (AttribExpr){0});
 
-    if (!parse_attrib_exprs(parser, stmt->attribs)) {
-        return false;
+    if (parse_attrib_exprs(parser, stmt->attribs)) {
+        return true;
     }
 
     token = parser->tokens[parser->token_idx];
@@ -656,12 +762,12 @@ bool parse_update_stmt(Parser *parser) {
         }
 
         parser->stmt = (Stmt *)stmt;
-        return true;
+        return false;
     }
 
     if (token.type != TT_WHERE) {
-        printf("UPD PARSER ERR: expecting 'where' keyword\n");
-        return false;
+        report_error(token.name, "UPD PARSER ERR: expecting 'where' keyword\n");
+        return true;
     }
 
     parser->token_idx++;
@@ -671,8 +777,8 @@ bool parse_update_stmt(Parser *parser) {
     // printf("where_expr: %p\n", stmt->where_expr);
     // printf("st type: %d\n", stmt->type);
 
-    if (!parse_expr(parser, stmt->where_expr)) {
-        return false;
+    if (parse_expr(parser, stmt->where_expr)) {
+        return true;
     }
 
     token = parser->tokens[parser->token_idx];
@@ -683,7 +789,7 @@ bool parse_update_stmt(Parser *parser) {
     }
 
     parser->stmt = (Stmt *)stmt;
-    return true;
+    return false;
 }
 
 bool parse_token_list(
@@ -705,17 +811,17 @@ bool parse_token_list(
 
         printf("---- %s: "SVFmt"\n", getTokenTypeStr(token.type), SVArg(token.name));
         if (!tt_isoneof_array(token.type, expected_types_count, expected_types)) {
-            printf("TK LIST PARSER ERR: expecting");
+            report_error(token.name, "TK LIST PARSER ERR: expecting");
             for (int i = 0; i < expected_types_count; ++i) {
-                printf(" %s", getTokenTypeStr(expected_types[i]));
+                report_append(" %s", getTokenTypeStr(expected_types[i]));
                 if (i != expected_types_count - 1) {
-                    printf(" or");
+                    report_append(" or");
                 }
             }
-            printf(".\n");
+            report_append(".\n");
 
             parser->token_idx = start;
-            return false;
+            return true;
         }
 
         if (fields == NULL) {
@@ -733,7 +839,7 @@ bool parse_token_list(
 
     *out_fields = fields_start;
 
-    return true;
+    return false;
 }
 
 bool parse_insert_stmt(Parser *parser) {
@@ -747,9 +853,9 @@ bool parse_insert_stmt(Parser *parser) {
     Token token = parser_next_token(parser);
 
     if (token.type != TT_IDENTIFIER) {
-        printf("INS PARSER ERR: expecting identifier.(1)\n");
+        report_error(token.name, "INS PARSER ERR: expecting identifier.(1)\n");
         parser->token_idx = start;
-        return false;
+        return true;
     }
 
     stmt->table_name = token;
@@ -757,16 +863,16 @@ bool parse_insert_stmt(Parser *parser) {
     token = parser_next_token(parser);
 
     if (token.type != TT_OPEN_PAREN) {
-        printf("INS PARSER ERR: expecting '('.(1)\n");
+        report_error(token.name, "INS PARSER ERR: expecting '('.(1)\n");
         parser->token_idx = start;
-        return false;
+        return true;
     }
  
     TokenList *fields = NULL;
 
-    if (!parse_token_list(parser, 1, (TokenType[]){ TT_IDENTIFIER }, &fields)) {
+    if (parse_token_list(parser, 1, (TokenType[]){ TT_IDENTIFIER }, &fields)) {
         parser->token_idx = start;
-        return false;
+        return true;
     }
 
     stmt->fields = fields;
@@ -775,17 +881,17 @@ bool parse_insert_stmt(Parser *parser) {
 
     printf("---- %s: "SVFmt"\n", getTokenTypeStr(token.type), SVArg(token.name));
     if (token.type != TT_CLOSE_PAREN) {
-        printf("INS PARSER ERR: expecting ')'.(1)\n");
+        report_error(token.name, "INS PARSER ERR: expecting ')'.(1)\n");
         parser->token_idx = start;
-        return false;
+        return true;
     }
 
     token = parser_next_token(parser);
 
     if (token.type != TT_VALUES) {
-        printf("INS PARSER ERR: expecting keyword 'values'.(1)\n");
+        report_error(token.name, "INS PARSER ERR: expecting keyword 'values'.(1)\n");
         parser->token_idx = start;
-        return false;
+        return true;
     }
 
     TokenListList *values_list = NULL;
@@ -795,25 +901,25 @@ bool parse_insert_stmt(Parser *parser) {
 
         printf("---- %s: "SVFmt"\n", getTokenTypeStr(token.type), SVArg(token.name));
         if (token.type != TT_OPEN_PAREN) {
-            printf("INS PARSER ERR: expecting '('.(2)\n");
+            report_error(token.name, "INS PARSER ERR: expecting '('.(2)\n");
             parser->token_idx = start;
-            return false;
+            return true;
         }
 
         fields = NULL;
 
         TokenType expected[3] = { TT_NUMBER, TT_STRING, TT_IDENTIFIER };
-        if (!parse_token_list(parser, 3, expected, &fields)) {
+        if (parse_token_list(parser, 3, expected, &fields)) {
             parser->token_idx = start;
-            return false;
+            return true;
         }
 
         token = parser_current_token(parser);
 
         if (token.type != TT_CLOSE_PAREN) {
-            printf("INS PARSER ERR: expecting ')'.(2)\n");
+            report_error(token.name, "INS PARSER ERR: expecting ')'.(2)\n");
             parser->token_idx = start;
-            return false;
+            return true;
         }
 
         if (values_list == NULL) {
@@ -835,7 +941,7 @@ bool parse_insert_stmt(Parser *parser) {
 
     parser->stmt = (Stmt *)stmt;
 
-    return true;
+    return false;
 }
 
 bool parse_select_stmt(Parser *parser) {
@@ -848,9 +954,9 @@ bool parse_select_stmt(Parser *parser) {
 
     TokenList *fields = NULL;
 
-    if (!parse_token_list(parser, 2, (TokenType[2]){ TT_IDENTIFIER, TT_STAR }, &fields)) {
+    if (parse_token_list(parser, 2, (TokenType[2]){ TT_IDENTIFIER, TT_STAR }, &fields)) {
         parser->token_idx = start;
-        return false;
+        return true;
     }
 
     stmt->fields = fields;
@@ -858,17 +964,17 @@ bool parse_select_stmt(Parser *parser) {
     Token token = parser_current_token(parser);
 
     if (token.type != TT_FROM) {
-        printf("SEL PARSER ERR: expecting keyword 'from'.(1)\n");
+        report_error(token.name, "SEL PARSER ERR: expecting keyword 'from'.(1)\n");
         parser->token_idx = start;
-        return false;
+        return true;
     }
 
     token = parser_next_token(parser);
 
     if (token.type != TT_IDENTIFIER) {
-        printf("SEL PARSER ERR: expecting identifier.(2)\n");
+        report_error(token.name, "SEL PARSER ERR: expecting identifier.(2)\n");
         parser->token_idx = start;
-        return false;
+        return true;
     }
 
     stmt->table_name = token;
@@ -878,9 +984,9 @@ bool parse_select_stmt(Parser *parser) {
     if (token.type == TT_GROUP_BY) {
         stmt->group_by = parser_alloc(parser, (GroupByDecl){0});
 
-        if (!parse_token_list(parser, 1, (TokenType[1]){ TT_IDENTIFIER }, &fields)) {
+        if (parse_token_list(parser, 1, (TokenType[1]){ TT_IDENTIFIER }, &fields)) {
             parser->token_idx = start;
-            return false;
+            return true;
         }
 
         stmt->group_by->fields =  fields;
@@ -890,9 +996,9 @@ bool parse_select_stmt(Parser *parser) {
             
             stmt->group_by->having_expr_list = parser_alloc(parser, (Expr){0});
 
-            if (!parse_expr(parser, stmt->group_by->having_expr_list)) {
+            if (parse_expr(parser, stmt->group_by->having_expr_list)) {
                 parser->token_idx = start;
-                return false;
+                return true;
             }
         }
     }
@@ -903,7 +1009,7 @@ bool parse_select_stmt(Parser *parser) {
 
     parser->stmt = (Stmt *)stmt;
 
-    return true;
+    return false;
 }
 
 Token *tk_read_tokens(const char *text) {
@@ -912,9 +1018,9 @@ Token *tk_read_tokens(const char *text) {
     Token token = {0};
 
     do {
-        if (!tk_next_token(&tokenizer, &token)) {
-            printf("ERR: %s\n", tokenizer.err_msg);
-            return false;
+        if (tk_next_token(&tokenizer, &token)) {
+            darray_destroy(tokens);
+            return NULL;
         }
 
         darray_push(tokens, token);
@@ -942,7 +1048,8 @@ bool parse(Parser *parser) {
             return parse_select_stmt(parser);
     }
 
-    return false;
+    report_error(token.name, "Unknown statement");
+    return true;
 }
 
 void print_expr(Expr *expr, int depth) {
@@ -1075,7 +1182,10 @@ void print_stmt(Stmt *stmt) {
 }
 
 static const char *test =
-    "select *, x, y from restaurants group by x;";
+    "delete 123";
+
+static const char *test6 =
+    "select *, x, y from _restaurants group by x;";
 
 static const char *test5 =
     "insert into restaurants (a, b, c) values (1, 2, 3), (4, 5, 6);";
@@ -1096,9 +1206,19 @@ static const char *test2 =
     ;
 
 int main() {
-    Parser p = parser_make(tk_read_tokens(test));
+    error_init(test);
 
-    if (!parse(&p)) {
+    Token *tokens = tk_read_tokens(test);
+
+    if (tokens == NULL) {
+        error_print();
+        return 0;
+    }
+
+    Parser p = parser_make(tokens);
+
+    if (parse(&p)) {
+        error_print();
         printf("parse fail\n");
     } else {
         print_stmt(p.stmt);
@@ -1360,10 +1480,6 @@ Token tk_make_identifier_token(Tokenizer *tokenizer, StringView data) {
     };
 }
 
-#define RETURN_TK_ERROR(t, msg, ...) \
-    snprintf((t)->err_msg, 128, msg, __VA_ARGS__); \
-    return false
-
 bool tk_read_identifier(Tokenizer *tokenizer, Token *token) {
     assert(!sv_is_empty(tokenizer->data));
 
@@ -1378,14 +1494,8 @@ bool tk_read_identifier(Tokenizer *tokenizer, Token *token) {
         StringView s = sv_read_while_alnum(data);
         data = sv_skip(data, s.size);
     } else {
-        int size = MIN(10, tokenizer->data.size);
-
-        RETURN_TK_ERROR(
-            tokenizer,
-            "Could not read identifier at: %.*s",
-            size,
-            tokenizer->data.data
-        );
+        report_error(tokenizer->data, "Could not read identifier(1)");
+        return true;
     }
 
     StringView saved = data;
@@ -1395,7 +1505,7 @@ bool tk_read_identifier(Tokenizer *tokenizer, Token *token) {
     if (sv_is_empty(data)) {
         data = saved;
         *token = tk_make_identifier_token(tokenizer, data);
-        return true;
+        return false;
     }
 
     c = data.data[0];
@@ -1405,14 +1515,8 @@ bool tk_read_identifier(Tokenizer *tokenizer, Token *token) {
         data = sv_skip_spaces(data);
 
         if (sv_is_empty(data)) {
-            int size = MIN(10, tokenizer->data.size);
-
-            RETURN_TK_ERROR(
-                tokenizer,
-                "Could not read identifier at: %.*s",
-                size,
-                tokenizer->data.data
-            );
+            report_error(tokenizer->data, "Could not read identifier(2)");
+            return true;
         }
 
         c = data.data[0];
@@ -1422,14 +1526,14 @@ bool tk_read_identifier(Tokenizer *tokenizer, Token *token) {
             data = sv_skip(data, s.size + 1);
 
             *token = tk_make_identifier_token(tokenizer, data);
-            return true;
+            return false;
         }
 
         if (c == '*') {
             data = sv_skip(data, 1);
 
             *token = tk_make_identifier_token(tokenizer, data);
-            return true;
+            return false;
         }
 
         if (IS_ALPHA(c)) {
@@ -1437,22 +1541,17 @@ bool tk_read_identifier(Tokenizer *tokenizer, Token *token) {
             data = sv_skip(data, s.size);
 
             *token = tk_make_identifier_token(tokenizer, data);
-            return true;
+            return false;
         }
 
-        int size = MIN(10, tokenizer->data.size);
-        RETURN_TK_ERROR(
-            tokenizer,
-            "Could not read identifier at: %.*s",
-            size,
-            tokenizer->data.data
-        );
+        report_error(tokenizer->data, "Could not read identifier(3)");
+        return true;
     } else {
         data = saved;
     }
 
     *token = tk_make_identifier_token(tokenizer, data);
-    return true;
+    return false;
 }
 
 bool tk_read_number(Tokenizer *tokenizer, Token *token) {
@@ -1492,16 +1591,11 @@ bool tk_read_number(Tokenizer *tokenizer, Token *token) {
         token->type = TT_NUMBER;
         token->name = name;
 
-        return true;
+        return false;
     }
 
-    int size = MIN(10, tokenizer->data.size);
-    RETURN_TK_ERROR(
-        tokenizer,
-        "Could not read number at: %.*s",
-        size,
-        tokenizer->data.data
-    );
+    report_error(tokenizer->data, "Could not read number");
+    return true;
 }
 
 bool tk_read_string(Tokenizer *tokenizer, Token *token) {
@@ -1522,15 +1616,12 @@ bool tk_read_string(Tokenizer *tokenizer, Token *token) {
 
         token->type = TT_NUMBER;
         token->name = name;
+
+        return false;
     }
 
-    int size = MIN(10, tokenizer->data.size);
-    RETURN_TK_ERROR(
-        tokenizer,
-        "Could not read string at: %.*s",
-        size,
-        tokenizer->data.data
-    );
+    report_error(tokenizer->data, "Could not read string");
+    return true;
 }
 
 bool tk_next_token(Tokenizer *tokenizer, Token *token) {
@@ -1539,7 +1630,7 @@ bool tk_next_token(Tokenizer *tokenizer, Token *token) {
     if (sv_is_empty(tokenizer->data)) {
         token->type = TT_EOF;
         token->name = sv_make(NULL, 0);
-        return true;
+        return false;
     }
 
     char c = tokenizer->data.data[0];
@@ -1549,22 +1640,22 @@ bool tk_next_token(Tokenizer *tokenizer, Token *token) {
             token->type = TT_MINUS;
             token->name = sv_make(tokenizer->data.data, 1);
             tokenizer->data = sv_skip(tokenizer->data, 1);
-            return true;
+            return false;
         case '+':
             token->type = TT_PLUS;
             token->name = sv_make(tokenizer->data.data, 1);
             tokenizer->data = sv_skip(tokenizer->data, 1);
-            return true;
+            return false;
         case '/':
             token->type = TT_SLASH;
             token->name = sv_make(tokenizer->data.data, 1);
             tokenizer->data = sv_skip(tokenizer->data, 1);
-            return true;
+            return false;
         case '*':
             token->type = TT_STAR;
             token->name = sv_make(tokenizer->data.data, 1);
             tokenizer->data = sv_skip(tokenizer->data, 1);
-            return true;
+            return false;
         case '>':
             token->type = TT_BOOL_OP;
             token->name = sv_make(tokenizer->data.data, 1);
@@ -1578,7 +1669,7 @@ bool tk_next_token(Tokenizer *tokenizer, Token *token) {
                     tokenizer->data = sv_skip(tokenizer->data, 1);
                 }
             }
-            return true;
+            return false;
         case '<':
             token->type = TT_BOOL_OP;
             token->name = sv_make(tokenizer->data.data, 1);
@@ -1592,12 +1683,12 @@ bool tk_next_token(Tokenizer *tokenizer, Token *token) {
                     tokenizer->data = sv_skip(tokenizer->data, 1);
                 }
             }
-            return true;
+            return false;
         case '=':
             token->name = sv_make(tokenizer->data.data, 1);
             tokenizer->data = sv_skip(tokenizer->data, 1);
             token->type = TT_BOOL_OP;
-            return true;
+            return false;
         case '!':
             if (tokenizer->data.size >= 2) {
                 StringView s = sv_make(tokenizer->data.data, 2);
@@ -1606,36 +1697,32 @@ bool tk_next_token(Tokenizer *tokenizer, Token *token) {
                     token->type = TT_BOOL_OP;
                     token->name = sv_make(tokenizer->data.data, 2);
                     tokenizer->data = sv_skip(tokenizer->data, 2);
-                    return true;
+                    return false;
                 }
             }
 
-            RETURN_TK_ERROR(
-                tokenizer,
-                "Could not read symbol at: %.*s",
-                MIN(10, tokenizer->data.size),
-                tokenizer->data.data
-            );
+            report_error(tokenizer->data, "Could not read symbol");
+            return true;
         case '(':
             token->type = TT_OPEN_PAREN;
             token->name = sv_make(tokenizer->data.data, 1);
             tokenizer->data = sv_skip(tokenizer->data, 1);
-            return true;
+            return false;
         case ')':
             token->type = TT_CLOSE_PAREN;
             token->name = sv_make(tokenizer->data.data, 1);
             tokenizer->data = sv_skip(tokenizer->data, 1);
-            return true;
+            return false;
         case ',':
             token->type = TT_COMMA;
             token->name = sv_make(tokenizer->data.data, 1);
             tokenizer->data = sv_skip(tokenizer->data, 1);
-            return true;
+            return false;
         case ';':
             token->type = TT_SEMI;
             token->name = sv_make(tokenizer->data.data, 1);
             tokenizer->data = sv_skip(tokenizer->data, 1);
-            return true;
+            return false;
         case '\'':
             return tk_read_string(tokenizer, token);
         default:
@@ -1644,7 +1731,7 @@ bool tk_next_token(Tokenizer *tokenizer, Token *token) {
             }
 
             if (c == '"' || IS_ALPHA(c)) {
-                if (tk_read_identifier(tokenizer, token)) {
+                if (!tk_read_identifier(tokenizer, token)) {
                     for (int i = 0; i < TT_TOKEN_COUNT; ++i) {
                         const char **keywords = keywords_map[i];
 
@@ -1667,7 +1754,8 @@ bool tk_next_token(Tokenizer *tokenizer, Token *token) {
                                         break;
                                     }
 
-                                    if (!tk_read_identifier(tokenizer, token)) {
+                                    if (tk_read_identifier(tokenizer, token)) {
+                                        error_reset();
                                         found = false;
                                         break;
                                     }
@@ -1693,19 +1781,15 @@ bool tk_next_token(Tokenizer *tokenizer, Token *token) {
                         }
                     }
 
-                    return true;
-                } else {
                     return false;
+                } else {
+                    return true;
                 }
             }
 
             break;
     }
 
-    RETURN_TK_ERROR(
-        tokenizer,
-        "Could not read symbol at: %.*s",
-        MIN(10, tokenizer->data.size),
-        tokenizer->data.data
-    );
+    report_error(tokenizer->data, "Could not read symbol");
+    return true;
 }
