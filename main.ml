@@ -1,4 +1,3 @@
-(* TODO: Implement parse for keywords In, Like, ILike *)
 (* TODO: Implement the formating *)
 
 (* List *)
@@ -75,6 +74,7 @@ type token_type_t =
   | Limit
   | Offset
   | As
+  | Distinct
 
 type token_t =
   { ttype: token_type_t
@@ -132,6 +132,7 @@ let int_of_token_type = function
   | Limit -> 45
   | Offset -> 46
   | As -> 47
+  | Distinct -> 48
 
 let sprint_token_type = function
   | Eof -> "Eof"
@@ -182,6 +183,7 @@ let sprint_token_type = function
   | Limit -> "Limit"
   | Offset -> "Offset"
   | As -> "As"
+  | Distinct -> "Distinct"
 
 let keywords_map: (token_type_t * string list) list =
   [ (And,            ["and"])
@@ -214,6 +216,7 @@ let keywords_map: (token_type_t * string list) list =
   ; (Set,            ["set"])
   ; (From,           ["from"])
   ; (As,             ["as"])
+  ; (Distinct,       ["distinct"])
   ]
 
 type context_t =
@@ -548,6 +551,7 @@ type expr_t =
   | Value of token_type_t
   | Parentheses of expr_t
   | BinOp of { op: token_type_t; lhs: expr_t; rhs: expr_t }
+  | InList of { op: token_type_t; values: expr_t list }
 
 type assign_t =
   { lhs: token_type_t
@@ -585,6 +589,7 @@ type select_stmt_t =
   ; group_by: group_by_stmt_t option
   ; limit: token_type_t option
   ; offset: token_type_t option
+  ; distinct: bool
   }
 and join_stmt_t =
   { join_type: join_type_t
@@ -681,7 +686,7 @@ let parser_ident (p: parser_t): string parser_result_t =
     | _ ->
       parser_unexpected_token token "2.. "
 
-let op_list = [Plus; Minus; Star; Slash ;Gt; Ge; Lt; Le; Equal]
+let op_list = [Plus; Minus; Star; Slash ;Gt; Ge; Lt; Le; Equal; Like; ILike; In; NotIn]
 
 let rec parser_expr (p: parser_t): expr_t parser_result_t =
   let token = parser_get_token p in
@@ -695,6 +700,22 @@ let rec parser_expr (p: parser_t): expr_t parser_result_t =
         (parser_advance p) |> parser_optional (parser_expect_oneof op_list)
       in
         match op_opt with
+        | Some In ->
+          let* p', _ = parser_expect OpenParen p' in
+          let* p', values = parser_expr_list p' in
+          let* p', _ = parser_expect CloseParen p' in
+          let expr =
+            InList { op = In; values = values }
+          in
+            Ok (p', expr)
+        | Some NotIn ->
+          let* p', _ = parser_expect OpenParen p' in
+          let* p', values = parser_expr_list p' in
+          let* p', _ = parser_expect CloseParen p' in
+          let expr =
+            InList { op = NotIn; values = values }
+          in
+            Ok (p', expr)
         | Some op ->
           let* p', rhs = parser_expr p' in
           let expr =
@@ -705,6 +726,17 @@ let rec parser_expr (p: parser_t): expr_t parser_result_t =
     end
     | _ -> 
       parser_unexpected_token token "5.. "
+
+and parser_expr_list (p: parser_t): (expr_t list) parser_result_t =
+  let rec loop p' result =
+    let* p', expr = parser_expr p' in
+    let result = expr :: result in
+    let token = parser_get_token p' in
+      match token.ttype with
+      | Comma -> loop (parser_advance p') result
+      | _ -> Ok (p', List.rev result)
+  in
+    loop p []
 
 let parser_field_list (parser1: parser_t): (field_t list) parser_result_t =
   let rec loop p result =
@@ -816,6 +848,7 @@ let parser_where (p: parser_t): (where_stmt_t option) parser_result_t =
 
 let rec parser_single_select p =
   let* p, _ = parser_expect Select p in
+  let* p, distinct_opt = p |> parser_optional (parser_expect Distinct) in
   let* p, fields = parser_field_list p in
   let* p, _ = parser_expect From p in
   let* p, table = parser_selectable p in
@@ -840,6 +873,7 @@ let rec parser_single_select p =
     ; where = where_opt
     ; limit = limit_opt
     ; offset = offset_opt 
+    ; distinct = Option.is_some distinct_opt
     }
   in
     Ok (p, select_stmt)
@@ -951,6 +985,9 @@ let rec print_expr expr depth =
     Printf.printf "%s\n" (sprint_token_type binop.op);
     print_expr binop.lhs (depth + 2);
     print_expr binop.rhs (depth + 2)
+  | InList l ->
+    Printf.printf "%s\n" (sprint_token_type l.op);
+    List.iter (fun v -> print_expr v (depth + 2)) l.values
 
 let rec print_selectable (s: selectable_t) (depth: int): unit =
   let depth_str = Printf.sprintf "%*s" depth "" in
@@ -987,6 +1024,9 @@ let rec print_selectable (s: selectable_t) (depth: int): unit =
 and print_select (s: select_stmt_t) (depth: int): unit =
   let depth_str = Printf.sprintf "%*s" depth ""
   in
+
+  Printf.printf "%s" depth_str;
+  Printf.printf "select %s\n" (if s.distinct then "distinct" else "");
 
   print_selectable s.table (depth + 2);
 
@@ -1069,7 +1109,7 @@ let () =
   (*let input = "select *, abc as nwa, x.y from restaurants as r inner join settings as s on restaurant_id = id where x + 1 order by x limit 12 offset 100;" in*)
   (*let input = "select a.*, b, c from (select * from t) as k inner join (select x, y from fears) as f on k.id = f.id;"
   in*)
-  let input = "select a from (today inner join tomorrow on a = b)"
+  let input = "select distinct a from (today inner join tomorrow on a = b) where x not in (1, 2, 3)"
   in
   let ctx =
     { data = input
