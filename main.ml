@@ -1,5 +1,4 @@
 (* TODO: Implement parse for keywords In, Like, ILike *)
-(* TODO: Maybe expand or implement cases like select * from ({select | name} join {select | name}) *)
 (* TODO: Implement the formating *)
 
 (* List *)
@@ -595,6 +594,12 @@ and join_stmt_t =
 and selectable_t =
   | Table of { name: string; alias: string option }
   | Subselect of { select: select_stmt_t; alias: string option }
+  | Subjoin of
+    { lhs: selectable_t
+    ; rhs: selectable_t
+    ; join_type: join_type_t
+    ; condition: expr_t
+    }
 
 let parser_unexpected_token token msg =
   Error (Printf.sprintf "%sUnexpected token %s" msg (sprint_token token))
@@ -879,25 +884,49 @@ and parser_selectable p =
         Ok (p', selectable)
   end
   | OpenParen -> begin
-    let* p', select = parser_single_select p' in
-    let* p', _ = parser_expect CloseParen p' in
-    let* p', opt = p' |> parser_optional (parser_expect As) in
-    match opt with
-    | Some _ ->
-      let* p', alias = parser_ident p' in
+    let token = parser_get_token p' in
+    match token.ttype with
+    | OpenParen
+    | Identifier _ ->
+      let* p', lhs = parser_selectable p' in
+      let* p', tt = parser_expect_oneof join_list p' in
+      let* p', rhs = parser_selectable p' in
+      let* p', _ = parser_expect On p' in
+      let* p', expr = parser_expr p' in
+      let* p', _ = parser_expect CloseParen p' in
+      let join_type = to_join_type tt in
       let selectable =
-        Subselect { select = select; alias = Some alias }
+        Subjoin
+          { lhs = lhs
+          ; rhs = rhs
+          ; join_type = join_type
+          ; condition = expr
+        }
       in
         Ok (p', selectable)
-    | None ->
-      let* p', alias_opt = p' |> parser_optional parser_ident in
-      let selectable =
-        Subselect { select = select; alias = alias_opt }
-      in
-        Ok (p', selectable)
+    | Select -> begin
+      let* p', select = parser_single_select p' in
+      let* p', _ = parser_expect CloseParen p' in
+      let* p', opt = p' |> parser_optional (parser_expect As) in
+      match opt with
+      | Some _ ->
+        let* p', alias = parser_ident p' in
+        let selectable =
+          Subselect { select = select; alias = Some alias }
+        in
+          Ok (p', selectable)
+      | None ->
+        let* p', alias_opt = p' |> parser_optional parser_ident in
+        let selectable =
+          Subselect { select = select; alias = alias_opt }
+        in
+          Ok (p', selectable)
+    end
+    | _ ->
+      parser_unexpected_token token "6.. "
   end
   | _ ->
-    parser_unexpected_token token "6.. "
+    parser_unexpected_token token "8.. "
 
 let parser_select p =
   let* p, select_stmt = parser_single_select p in
@@ -923,11 +952,9 @@ let rec print_expr expr depth =
     print_expr binop.lhs (depth + 2);
     print_expr binop.rhs (depth + 2)
 
-let rec print_select (s: select_stmt_t) (depth: int): unit =
-  let depth_str = Printf.sprintf "%*s" depth ""
-  in
-
-  (match s.table with
+let rec print_selectable (s: selectable_t) (depth: int): unit =
+  let depth_str = Printf.sprintf "%*s" depth "" in
+  match s with
   | Table t -> (
     match t.alias with
     | Some alias ->
@@ -948,7 +975,20 @@ let rec print_select (s: select_stmt_t) (depth: int): unit =
     );
     print_select s.select (depth + 2)
   )
-  );
+  | Subjoin s -> (
+    Printf.printf "%s" depth_str;
+    Printf.printf "%s\n" (sprint_token_type (from_join_type s.join_type));
+    print_selectable s.lhs (depth + 2);
+    print_selectable s.rhs (depth + 2);
+    Printf.printf "%s" depth_str;
+    Printf.printf " on\n";
+    print_expr s.condition (depth + 2)
+  )
+and print_select (s: select_stmt_t) (depth: int): unit =
+  let depth_str = Printf.sprintf "%*s" depth ""
+  in
+
+  print_selectable s.table (depth + 2);
 
   Printf.printf "%s" depth_str;
   Printf.printf "fields:\n";
@@ -968,28 +1008,8 @@ let rec print_select (s: select_stmt_t) (depth: int): unit =
     fun v ->
       Printf.printf "%s" depth_str;
       Printf.printf "%s\n" (sprint_token_type (from_join_type v.join_type));
-      (match v.table with
-      | Table t -> (
-        match t.alias with
-        | Some alias ->
-          Printf.printf "%s" depth_str;
-          Printf.printf "table: %s as %s\n" t.name alias
-        | None ->
-          Printf.printf "%s" depth_str;
-          Printf.printf "table: %s\n" t.name
-      )
-      | Subselect s -> begin
-        (match s.alias with
-        | Some alias ->
-          Printf.printf "%s" depth_str;
-          Printf.printf "from select as: %s\n" alias
-        | None ->
-          Printf.printf "%s" depth_str;
-          Printf.printf "from select without alias\n"
-        );
-        print_select s.select (depth + 2)
-      end
-      );
+
+      print_selectable v.table (depth + 2);
       Printf.printf "%s" depth_str;
       Printf.printf " on\n";
       print_expr v.condition (depth + 2)
@@ -1047,7 +1067,9 @@ let rec print_select (s: select_stmt_t) (depth: int): unit =
   
 let () =
   (*let input = "select *, abc as nwa, x.y from restaurants as r inner join settings as s on restaurant_id = id where x + 1 order by x limit 12 offset 100;" in*)
-  let input = "select a.*, b, c from (select * from t) as k inner join (select x, y from fears) as f on k.id = f.id;"
+  (*let input = "select a.*, b, c from (select * from t) as k inner join (select x, y from fears) as f on k.id = f.id;"
+  in*)
+  let input = "select a from (today inner join tomorrow on a = b)"
   in
   let ctx =
     { data = input
