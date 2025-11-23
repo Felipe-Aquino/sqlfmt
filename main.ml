@@ -185,6 +185,57 @@ let sprint_token_type = function
   | As -> "As"
   | Distinct -> "Distinct"
 
+let sprint_token_name_or_symbol = function
+  | Eof -> "EOF"
+  | Identifier v -> v
+  | Number v -> v
+  | String v -> v
+  | Attrib -> "="
+  | Plus -> "+"
+  | Minus -> "-"
+  | Slash -> "/"
+  | Star -> "*"
+  | Gt -> ">"
+  | Ge -> ">="
+  | Lt -> "<"
+  | Le -> "<="
+  | Equal -> "="
+  | And -> "AND"
+  | Or -> "OR"
+  | Like -> "LIKE"
+  | ILike -> "ILIKE"
+  | In -> "IN"
+  | NotIn -> "NOTIN"
+  | OpenParen -> "("
+  | CloseParen -> ")"
+  | Semi -> ";"
+  | Comma -> ","
+  | Select -> "SELECT"
+  | InsertInto -> "INSERT into"
+  | DeleteFrom -> "DELETE FROM"
+  | Update -> "UPDATE"
+  | From -> "FROM"
+  | Set -> "SET"
+  | Values -> "VALUES"
+  | InnerJoin -> "INNER JOIN"
+  | LeftJoin -> "LEFT JOIN"
+  | RightJoin -> "RIGHT JOIN"
+  | LeftOuterJoin -> "LEFT OUTER JOIN"
+  | RightOuterJoin -> "RIGHT OUTER JOIN"
+  | On -> "ON"
+  | Where -> "WHERE"
+  | IsNot -> "IS NOT"
+  | Is -> "IS"
+  | OrderBy -> "ORDER BY"
+  | GroupBy -> "GROUP BY"
+  | Having -> "HAVING"
+  | Asc -> "ASC"
+  | Desc -> "DESC"
+  | Limit -> "LIMIT"
+  | Offset -> "OFFSET"
+  | As -> "AS"
+  | Distinct -> "DISTINCT"
+
 let keywords_map: (token_type_t * string list) list =
   [ (And,            ["and"])
   ; (Or,             ["or"])
@@ -551,7 +602,7 @@ type expr_t =
   | Value of token_type_t
   | Parentheses of expr_t
   | BinOp of { op: token_type_t; lhs: expr_t; rhs: expr_t }
-  | InList of { op: token_type_t; values: expr_t list }
+  | InList of { name: expr_t; op: token_type_t; values: expr_t list }
 
 type assign_t =
   { lhs: token_type_t
@@ -705,7 +756,7 @@ let rec parser_expr (p: parser_t): expr_t parser_result_t =
           let* p', values = parser_expr_list p' in
           let* p', _ = parser_expect CloseParen p' in
           let expr =
-            InList { op = In; values = values }
+            InList { name = Value token.ttype; op = In; values = values }
           in
             Ok (p', expr)
         | Some NotIn ->
@@ -713,7 +764,7 @@ let rec parser_expr (p: parser_t): expr_t parser_result_t =
           let* p', values = parser_expr_list p' in
           let* p', _ = parser_expect CloseParen p' in
           let expr =
-            InList { op = NotIn; values = values }
+            InList { name = Value token.ttype; op = NotIn; values = values }
           in
             Ok (p', expr)
         | Some op ->
@@ -1105,12 +1156,182 @@ and print_select (s: select_stmt_t) (depth: int): unit =
     Printf.printf "offset: %s\n" (sprint_token_type o)
   | None -> ()
   
+let rec format_expr expr depth =
+  Printf.printf "%*s" depth "";
+
+  match expr with
+  | Value Identifier v -> Printf.printf "%s" v
+  | Value Number v -> Printf.printf "%s" v
+  | Value String v -> Printf.printf "%s" v
+  | Value Star -> Printf.printf "*"
+  | Parentheses expr -> 
+    Printf.printf "(";
+    format_expr expr 0;
+    Printf.printf ")";
+  | BinOp binop ->
+    format_expr binop.lhs 0;
+    Printf.printf " %s " (sprint_token_name_or_symbol binop.op);
+    format_expr binop.rhs 0
+  | InList l ->
+    format_expr l.name 0;
+    (match l.op with
+    | In -> Printf.printf " IN "
+    | NotIn -> Printf.printf " NOT IN "
+    | _ -> failwith "format expr unreachable(3)"
+    );
+
+    Printf.printf "(";
+
+    let first = ref true in
+    List.iter
+      (fun v ->
+        if !first then (
+          first := false;
+          format_expr v 0
+        ) else (
+          Printf.printf ",";
+          format_expr v 0
+        )
+      )
+      l.values;
+
+    Printf.printf ")"
+  | _ -> failwith "format expr unreachable(2)"
+
+let rec format_selectable (s: selectable_t) (depth: int): unit =
+  let depth_str = Printf.sprintf "%*s" depth "" in
+  match s with
+  | Table t -> (
+    match t.alias with
+    | Some alias ->
+      Printf.printf "%s AS %s\n" t.name alias
+    | None ->
+      Printf.printf "%s" t.name
+  )
+  | Subselect s -> (
+    Printf.printf "(\n";
+    format_select s.select (depth + 2);
+    Printf.printf ")\n"
+  )
+  | Subjoin s -> (
+    Printf.printf "(\n";
+    Printf.printf "%s" depth_str;
+    format_selectable s.lhs depth;
+    Printf.printf " %s " (sprint_token_name_or_symbol (from_join_type s.join_type));
+    format_selectable s.rhs depth;
+    Printf.printf "\n%s" depth_str;
+    Printf.printf "ON ";
+    format_expr s.condition 0;
+    Printf.printf "\n)"
+  )
+and format_select (s: select_stmt_t) (depth: int): unit =
+  let depth_str = Printf.sprintf "%*s" depth ""
+  in
+
+  Printf.printf "%s" depth_str;
+  Printf.printf "SELECT %s \n" (if s.distinct then "DISTINCT " else "");
+
+  let first = ref true in
+  Printf.printf "%s" depth_str;
+  List.iter (
+    fun field ->
+      (if !first then
+        first := false
+       else
+        Printf.printf ",\n"
+      );
+
+      match field.alias with
+      | Some v ->
+        format_expr field.expr (depth + 2);
+        Printf.printf " AS %s" v
+      | None ->
+        format_expr field.expr (depth + 2)
+  )
+  s.fields;
+
+  Printf.printf "\n%sFROM " depth_str;
+
+  format_selectable s.table (depth + 2);
+
+  List.iter (
+    fun v ->
+      Printf.printf "%s" depth_str;
+      Printf.printf "%s " (sprint_token_name_or_symbol (from_join_type v.join_type));
+
+      format_selectable v.table (depth + 2);
+      Printf.printf "%s" depth_str;
+      Printf.printf "ON ";
+      format_expr v.condition 0
+  )
+  s.joins;
+
+  (match s.where with
+  | Some w ->
+    Printf.printf "\n%s" depth_str;
+    Printf.printf "WHERE ";
+    format_expr w.expr 0;
+    Printf.printf "\n"
+  | None -> ()
+  );
+
+  (match s.order_by with
+  | Some o ->
+    Printf.printf "%s" depth_str;
+    Printf.printf "ORDER BY ";
+    let first = ref true in
+      List.iter (
+        fun item ->
+          (if !first then
+            first := false
+           else
+            Printf.printf ","
+          );
+          format_expr item.expr 0;
+          if item.ascending then
+            Printf.printf " ASC"
+          else
+            Printf.printf " DESC"
+      )
+      o.items;
+      Printf.printf "\n"
+  | None -> ()
+  );
+
+  (match s.group_by with
+  | Some g -> (
+    Printf.printf "%s" depth_str;
+    Printf.printf "GROUP BY %s\n" (join ", " (fun a -> a) g.names);
+    match g.having with
+    | Some e ->
+      Printf.printf "%s" depth_str;
+      Printf.printf "HAVING \n";
+      format_expr e (depth + 2)
+    | None -> ()
+  )
+  | None -> ()
+  );
+
+  (match s.limit with
+  | Some l ->
+    Printf.printf "%s" depth_str;
+    Printf.printf "LIMIT %s\n" (sprint_token_name_or_symbol l)
+  | None -> ()
+  );
+
+  match s.offset with
+  | Some o ->
+    Printf.printf "%s" depth_str;
+    Printf.printf "OFFSET %s\n" (sprint_token_name_or_symbol o)
+  | None -> ()
+
 let () =
-  (*let input = "select *, abc as nwa, x.y from restaurants as r inner join settings as s on restaurant_id = id where x + 1 order by x limit 12 offset 100;" in*)
+  let input = "select *, abc as nwa, x.y from restaurants as r inner join settings as s on restaurant_id = id where x + 1 order by x limit 12 offset 100;"
+  in
   (*let input = "select a.*, b, c from (select * from t) as k inner join (select x, y from fears) as f on k.id = f.id;"
   in*)
-  let input = "select distinct a from (today inner join tomorrow on a = b) where x not in (1, 2, 3)"
-  in
+  (*let input = "select distinct a from (today inner join tomorrow on a = b) where x not in (1, 2, 3)"
+  in*)
   let ctx =
     { data = input
     ; pos = 0
@@ -1132,7 +1353,9 @@ let () =
     | Error e -> Printf.printf "parse error %s\n" e
     | Ok (p, s) ->
       Printf.printf "parse ok\n";
-      print_select s 0
+      print_select s 0;
+      Printf.printf "\n------\n\n";
+      format_select s 0
   )
   | Error e -> Printf.printf "%s\n" e
 
