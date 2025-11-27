@@ -655,6 +655,7 @@ and selectable_t =
     ; rhs: selectable_t
     ; join_type: join_type_t
     ; condition: expr_t
+    ; alias: string option
     }
 
 let parser_unexpected_token token msg =
@@ -980,15 +981,33 @@ and parser_selectable p =
       let* p', expr = parser_expr p' in
       let* p', _ = parser_expect CloseParen p' in
       let join_type = to_join_type tt in
-      let selectable =
-        Subjoin
-          { lhs = lhs
-          ; rhs = rhs
-          ; join_type = join_type
-          ; condition = expr
-        }
-      in
-        Ok (p', selectable)
+      let* p', opt = p' |> parser_optional (parser_expect As) in
+        (match opt with
+        | Some _ ->
+          let* p', alias = parser_ident p' in
+          let selectable =
+            Subjoin
+              { lhs = lhs
+              ; rhs = rhs
+              ; join_type = join_type
+              ; condition = expr
+              ; alias = Some alias
+            }
+          in
+            Ok (p', selectable)
+        | None ->
+          let* p', alias_opt = p' |> parser_optional parser_ident in
+          let selectable =
+            Subjoin
+              { lhs = lhs
+              ; rhs = rhs
+              ; join_type = join_type
+              ; condition = expr
+              ; alias = alias_opt
+            }
+          in
+            Ok (p', selectable)
+        )
     | Select -> begin
       let* p', select = parser_single_select p' in
       let* p', _ = parser_expect CloseParen p' in
@@ -1204,14 +1223,14 @@ let rec format_selectable (s: selectable_t) (depth: int): unit =
   | Table t -> (
     match t.alias with
     | Some alias ->
-      Printf.printf "%s AS %s\n" t.name alias
+      Printf.printf "%s AS %s" t.name alias
     | None ->
       Printf.printf "%s" t.name
   )
   | Subselect s -> (
     Printf.printf "(\n";
     format_select s.select (depth + 2);
-    Printf.printf ")\n"
+    Printf.printf "\n)"
   )
   | Subjoin s -> (
     Printf.printf "(\n";
@@ -1219,6 +1238,11 @@ let rec format_selectable (s: selectable_t) (depth: int): unit =
     format_selectable s.lhs depth;
     Printf.printf " %s " (sprint_token_name_or_symbol (from_join_type s.join_type));
     format_selectable s.rhs depth;
+    (match s.alias with
+    | Some alias ->
+      Printf.printf " AS %s" alias
+    | None -> ()
+    );
     Printf.printf "\n%s" depth_str;
     Printf.printf "ON ";
     format_expr s.condition 0;
@@ -1232,7 +1256,6 @@ and format_select (s: select_stmt_t) (depth: int): unit =
   Printf.printf "SELECT %s \n" (if s.distinct then "DISTINCT " else "");
 
   let first = ref true in
-  Printf.printf "%s" depth_str;
   List.iter (
     fun field ->
       (if !first then
@@ -1256,11 +1279,12 @@ and format_select (s: select_stmt_t) (depth: int): unit =
 
   List.iter (
     fun v ->
+      Printf.printf "\n";
       Printf.printf "%s" depth_str;
       Printf.printf "%s " (sprint_token_name_or_symbol (from_join_type v.join_type));
 
       format_selectable v.table (depth + 2);
-      Printf.printf "%s" depth_str;
+      Printf.printf "\n%s" depth_str;
       Printf.printf "ON ";
       format_expr v.condition 0
   )
@@ -1326,8 +1350,23 @@ and format_select (s: select_stmt_t) (depth: int): unit =
   | None -> ()
 
 let () =
-  let input = "select *, abc as nwa, x.y from restaurants as r inner join settings as s on restaurant_id = id where x + 1 order by x limit 12 offset 100;"
+  (*let input = "select *, abc as nwa, x.y from restaurants as r inner join settings as s on restaurant_id = id where x + 1 order by x limit 12 offset 100;"
+  in *)
+  let input = "
+    select *, abc as nwa, x.y from restaurants as r
+    inner join settings as s on restaurant_id = id
+    inner join (select u, v from uv) as s on restaurant_id = id
+    inner join (tbl1 left outer join tbl2 on p = q) as test on restaurant_id = id
+    where x + 1 > 2
+    order by x
+    limit 12
+    offset 100;
+  "
   in
+  (*let input = "
+  SELECT \"IndividualBill\".\"id\", \"rescues\".\"id\" AS \"rescues.id\", \"rescues\".\"cashback\" AS \"rescues.cashback\", \"rescues\".\"status\" AS \"rescues.status\", \"session\".\"id\" AS \"session.id\", \"session\".\"key\" AS \"session.key\", \"session\".\"nfce_allowed\" AS \"session.nfce_allowed\", \"session\".\"user_change\" AS \"session.user_change\", \"session\".\"with_withdrawal\" AS \"session.with_withdrawal\", \"session\".\"delivery_tax_price\" AS \"session.delivery_tax_price\", \"session\".\"total_price\" AS \"session.total_price\", \"session\".\"total_delivery_price\" AS \"session.total_delivery_price\", \"session\".\"attendance_password\" AS \"session.attendance_password\", \"session\".\"is_delivery\" AS \"session.is_delivery\", \"session\".\"discount_total\" AS \"session.discount_total\", \"session\".\"ifood_id\" AS \"session.ifood_id\", \"session\".\"ifood_discount\" AS \"session.ifood_discount\", \"session\".\"merchant_discount\" AS \"session.merchant_discount\", \"session\".\"ifood_document\" AS \"session.ifood_document\", \"session\".\"ifood_paid\" AS \"session.ifood_paid\", \"session\".\"additional_fees\" AS \"session.additional_fees\", \"session\".\"ready_at\" AS \"session.ready_at\", \"session\".\"accepted_at\" AS \"session.accepted_at\", \"session\".\"ongoing_at\" AS \"session.ongoing_at\", \"session\".\"ifood_delivery_time\" AS \"session.ifood_delivery_time\", \"session\".\"scheduled_to\" AS \"session.scheduled_to\", \"session\".\"discount_obs\" AS \"session.discount_obs\", \"session\".\"old_total_price\" AS \"session.old_total_price\", \"session\".\"details\" AS \"session.details\", \"session\".\"ifood_on_demand_id\" AS \"session.ifood_on_demand_id\", \"session\".\"delivery_by\" AS \"session.delivery_by\", \"session\".\"delivery_fee_discount\" AS \"session.delivery_fee_discount\", \"session\".\"total_paid\" AS \"session.total_paid\", \"session\".\"foody_delivery_session_id\" AS \"session.foody_delivery_session_id\", \"session\".\"neemo_id\" AS \"session.neemo_id\", \"session\".\"sales_channel\" AS \"session.sales_channel\", \"session->table\".\"id\" AS \"session.table.id\", \"session->table\".\"table_number\" AS \"session.table.table_number\", \"session->table\".\"status\" AS \"session.table.status\", \"session->table\".\"table_type\" AS \"session.table.table_type\", \"session->payments\".\"id\" AS \"session.payments.id\", \"session->payments\".\"payment_value\" AS \"session.payments.payment_value\", \"session->payments\".\"payment_method_id\" AS \"session.payments.payment_method_id\", \"session->payments\".\"created_at\" AS \"session.payments.created_at\", \"session->payments->payment_method\".\"id\" AS \"session.payments.payment_method.id\", \"session->payments->payment_method\".\"name\" AS \"session.payments.payment_method.name\", \"session->payment_method\".\"id\" AS \"session.payment_method.id\", \"session->payment_method\".\"name\" AS \"session.payment_method.name\", \"session->ifood_restaurant\".\"id\" AS \"session.ifood_restaurant.id\", \"session->ifood_restaurant\".\"name\" AS \"session.ifood_restaurant.name\", \"session->motoboy\".\"id\" AS \"session.motoboy.id\", \"session->motoboy\".\"name\" AS \"session.motoboy.name\", \"session->motoboy\".\"phone\" AS \"session.motoboy.phone\", \"session->buyer_address\".\"id\" AS \"session.buyer_address.id\", \"session->buyer_address\".\"state\" AS \"session.buyer_address.state\", \"session->buyer_address\".\"city\" AS \"session.buyer_address.city\", \"session->buyer_address\".\"neighborhood\" AS \"session.buyer_address.neighborhood\", \"session->buyer_address\".\"street\" AS \"session.buyer_address.street\", \"session->buyer_address\".\"number\" AS \"session.buyer_address.number\", \"session->buyer_address\".\"complement\" AS \"session.buyer_address.complement\", \"session->buyer_address\".\"reference\" AS \"session.buyer_address.reference\", \"session->buyer_address\".\"zip_code\" AS \"session.buyer_address.zip_code\", \"session->buyer_address\".\"longitude\" AS \"session.buyer_address.longitude\", \"session->buyer_address\".\"latitude\" AS \"session.buyer_address.latitude\", \"order_baskets\".\"id\" AS \"order_baskets.id\", \"order_baskets\".\"order_status\" AS \"order_baskets.order_status\", \"order_baskets\".\"basket_id\" AS \"order_baskets.basket_id\", \"order_baskets\".\"total_price\" AS \"order_baskets.total_price\", \"order_baskets\".\"total_service_price\" AS \"order_baskets.total_service_price\", \"order_baskets\".\"start_time\" AS \"order_baskets.start_time\", \"order_baskets\".\"close_time\" AS \"order_baskets.close_time\", \"order_baskets\".\"canceled_at\" AS \"order_baskets.canceled_at\", \"order_baskets\".\"ifood_id\" AS \"order_baskets.ifood_id\", \"order_baskets\".\"schedule\" AS \"order_baskets.schedule\", \"order_baskets\".\"ifood_table\" AS \"order_baskets.ifood_table\", \"order_baskets\".\"command_table_number\" AS \"order_baskets.command_table_number\", \"order_baskets\".\"scheduled_to\" AS \"order_baskets.scheduled_to\", \"order_baskets\".\"neemo_id\" AS \"order_baskets.neemo_id\", \"order_baskets->waiter\".\"id\" AS \"order_baskets.waiter.id\", \"order_baskets->waiter\".\"name\" AS \"order_baskets.waiter.name\", \"waiter\".\"id\" AS \"waiter.id\", \"waiter\".\"name\" AS \"waiter.name\", \"waiter\".\"is_protected\" AS \"waiter.is_protected\", \"buyer\".\"id\" AS \"buyer.id\", \"buyer\".\"name\" AS \"buyer.name\", \"buyer\".\"phone\" AS \"buyer.phone\", \"buyer\".\"email\" AS \"buyer.email\", \"buyer\".\"ifood_phone\" AS \"buyer.ifood_phone\", \"buyer\".\"neemo_phone\" AS \"buyer.neemo_phone\", \"buyer\".\"localizer\" AS \"buyer.localizer\" FROM \"individual_bills\" AS \"IndividualBill\" LEFT OUTER JOIN \"clube_rescues\" AS \"rescues\" ON \"IndividualBill\".\"id\" = \"rescues\".\"individual_bill_id\" INNER JOIN \"table_sessions\" AS \"session\" ON \"IndividualBill\".\"session_id\" = \"session\".\"id\" AND (\"session\".\"created_at\" BETWEEN '2025-11-16 12:49:18.038 +00:00' AND '2025-11-26 12:49:18.038 +00:00' OR \"session\".\"scheduled_to\" >= '2025-11-16 12:49:18.038 +00:00') AND \"session\".\"restaurant_id\" = 302 AND \"session\".\"status\" NOT IN ('completed', 'transfer') LEFT OUTER JOIN \"place_tables\" AS \"session->table\" ON \"session\".\"table_id\" = \"session->table\".\"id\" LEFT OUTER JOIN \"payments\" AS \"session->payments\" ON \"session\".\"id\" = \"session->payments\".\"table_session_id\" LEFT OUTER JOIN \"payment_methods\" AS \"session->payments->payment_method\" ON \"session->payments\".\"payment_method_id\" = \"session->payments->payment_method\".\"id\" LEFT OUTER JOIN \"payment_methods\" AS \"session->payment_method\" ON \"session\".\"intended_payment_method_id\" = \"session->payment_method\".\"id\" LEFT OUTER JOIN \"ifood_restaurants\" AS \"session->ifood_restaurant\" ON \"session\".\"ifood_restaurant_id\" = \"session->ifood_restaurant\".\"id\" LEFT OUTER JOIN \"motoboys\" AS \"session->motoboy\" ON \"session\".\"motoboy_id\" = \"session->motoboy\".\"id\" LEFT OUTER JOIN \"buyer_delivery_addresses\" AS \"session->buyer_address\" ON \"session\".\"buyer_delivery_address_id\" = \"session->buyer_address\".\"id\" INNER JOIN \"order_baskets\" AS \"order_baskets\" ON \"IndividualBill\".\"id\" = \"order_baskets\".\"bill_id\" AND \"order_baskets\".\"order_status\" IN ('canceled_waiting_payment', 'ready', 'pending', 'delivered', 'accepted', 'ongoing', 'canceled') LEFT OUTER JOIN \"waiters\" AS \"order_baskets->waiter\" ON \"order_baskets\".\"waiter_id\" = \"order_baskets->waiter\".\"id\" LEFT OUTER JOIN \"waiters\" AS \"waiter\" ON \"IndividualBill\".\"waiter_id\" = \"waiter\".\"id\" LEFT OUTER JOIN \"buyers\" AS \"buyer\" ON \"IndividualBill\".\"buyer_id\" = \"buyer\".\"id\";
+  "
+  in*)
   (*let input = "select a.*, b, c from (select * from t) as k inner join (select x, y from fears) as f on k.id = f.id;"
   in*)
   (*let input = "select distinct a from (today inner join tomorrow on a = b) where x not in (1, 2, 3)"
@@ -1355,7 +1394,8 @@ let () =
       Printf.printf "parse ok\n";
       print_select s 0;
       Printf.printf "\n------\n\n";
-      format_select s 0
+      format_select s 0;
+      Printf.printf "\n"
   )
   | Error e -> Printf.printf "%s\n" e
 
