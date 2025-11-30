@@ -1,6 +1,4 @@
-(* TODO: Implement the formating *)
 (* TODO: Add support to function calls *)
-(* TODO: Read from file or stdin *)
 
 (* List *)
 let drop (n: int) (ls: 'a list): 'a list =
@@ -307,6 +305,10 @@ let sprint_token token =
 
 let token_type_cmp (tt1: token_type_t) (tt2: token_type_t): bool =
   (int_of_token_type tt1) == (int_of_token_type tt2)
+
+let token_type_isoneof (t: token_type_t) (tts: token_type_t list): bool =
+  let found_opt = List.find_opt (token_type_cmp t) tts in
+    Option.is_some found_opt
 
 let fmt_ctx_pos ctx =
     Printf.sprintf "%d:%d(%d)" ctx.line ctx.column ctx.pos
@@ -761,40 +763,30 @@ let op_list =
   ]
 
 let rec parser_expr (p: parser_t): expr_t parser_result_t =
-  let parser_operator_opt lhs op_opt p' =
+  let rec parser_operator_opt lhs op_opt p' =
     match op_opt with
-    | Some In ->
+    | Some op when token_type_isoneof op [In; NotIn] ->
       let* p', _ = parser_expect OpenParen p' in
       let* p', values = parser_expr_list p' in
       let* p', _ = parser_expect CloseParen p' in
       let expr =
-        InList { name = lhs; op = In; values = values }
+        InList { name = lhs; op = op; values = values }
       in
-        Ok (p', expr)
-    | Some NotIn ->
-      let* p', _ = parser_expect OpenParen p' in
-      let* p', values = parser_expr_list p' in
-      let* p', _ = parser_expect CloseParen p' in
-      let expr =
-        InList { name = lhs; op = NotIn; values = values }
+      let* p', next_op_opt =
+        p' |> parser_optional (parser_expect_oneof [And; Or])
       in
-        Ok (p', expr)
-    | Some Between ->
+        parser_operator_opt expr next_op_opt p'
+    | Some op when token_type_isoneof op [Between; NotBetween] ->
       let* p', fst = p' |> parser_expect_oneof [String ""; Number ""; Identifier ""] in
       let* p', _ = parser_expect And p' in
       let* p', snd = p' |> parser_expect_oneof [String ""; Number ""; Identifier ""] in
       let expr =
-        BetweenOp { name = lhs; op = Between; first = Value fst; second = Value snd }
+        BetweenOp { name = lhs; op = op; first = Value fst; second = Value snd }
       in
-        Ok (p', expr)
-    | Some NotBetween ->
-      let* p', fst = p' |> parser_expect_oneof [String ""; Number ""; Identifier ""] in
-      let* p', _ = parser_expect And p' in
-      let* p', snd = p' |> parser_expect_oneof [String ""; Number ""; Identifier ""] in
-      let expr =
-        BetweenOp { name = lhs; op = NotBetween; first = Value fst; second = Value snd }
+      let* p', next_op_opt =
+        p' |> parser_optional (parser_expect_oneof [And; Or])
       in
-        Ok (p', expr)
+        parser_operator_opt expr next_op_opt p'
     | Some op ->
       let* p', rhs = parser_expr p' in
       let expr =
@@ -1413,30 +1405,7 @@ and format_select (s: select_stmt_t) (depth: int): unit =
     Printf.printf "OFFSET %s\n" (sprint_token_name_or_symbol o)
   | None -> ()
 
-let () =
-  (*let input = "select *, abc as nwa, x.y from restaurants as r inner join settings as s on restaurant_id = id where x + 1 order by x limit 12 offset 100;"
-  in*)
-  let input = "
-    select *, abc as nwa, x.y from restaurants as r
-    inner join settings as s on restaurant_id = id
-    inner join (select u, v from uv) as s on restaurant_id = id
-    inner join (tbl1 left outer join tbl2 on p = q and x > y) as test on restaurant_id = id
-    where (x + 1) > 2 and v = 3 and dt between 1 and 3
-    order by x
-    limit 12
-    offset 100;
-  "
-  in
-  (*let input = "
-  SELECT \"IndividualBill\".\"id\", \"rescues\".\"id\" AS \"rescues.id\", \"rescues\".\"cashback\" AS \"rescues.cashback\", \"rescues\".\"status\" AS \"rescues.status\", \"session\".\"id\" AS \"session.id\", \"session\".\"key\" AS \"session.key\", \"session\".\"nfce_allowed\" AS \"session.nfce_allowed\", \"session\".\"user_change\" AS \"session.user_change\", \"session\".\"with_withdrawal\" AS \"session.with_withdrawal\", \"session\".\"delivery_tax_price\" AS \"session.delivery_tax_price\", \"session\".\"total_price\" AS \"session.total_price\", \"session\".\"total_delivery_price\" AS \"session.total_delivery_price\", \"session\".\"attendance_password\" AS \"session.attendance_password\", \"session\".\"is_delivery\" AS \"session.is_delivery\", \"session\".\"discount_total\" AS \"session.discount_total\", \"session\".\"ifood_id\" AS \"session.ifood_id\", \"session\".\"ifood_discount\" AS \"session.ifood_discount\", \"session\".\"merchant_discount\" AS \"session.merchant_discount\", \"session\".\"ifood_document\" AS \"session.ifood_document\", \"session\".\"ifood_paid\" AS \"session.ifood_paid\", \"session\".\"additional_fees\" AS \"session.additional_fees\", \"session\".\"ready_at\" AS \"session.ready_at\", \"session\".\"accepted_at\" AS \"session.accepted_at\", \"session\".\"ongoing_at\" AS \"session.ongoing_at\", \"session\".\"ifood_delivery_time\" AS \"session.ifood_delivery_time\", \"session\".\"scheduled_to\" AS \"session.scheduled_to\", \"session\".\"discount_obs\" AS \"session.discount_obs\", \"session\".\"old_total_price\" AS \"session.old_total_price\", \"session\".\"details\" AS \"session.details\", \"session\".\"ifood_on_demand_id\" AS \"session.ifood_on_demand_id\", \"session\".\"delivery_by\" AS \"session.delivery_by\", \"session\".\"delivery_fee_discount\" AS \"session.delivery_fee_discount\", \"session\".\"total_paid\" AS \"session.total_paid\", \"session\".\"foody_delivery_session_id\" AS \"session.foody_delivery_session_id\", \"session\".\"neemo_id\" AS \"session.neemo_id\", \"session\".\"sales_channel\" AS \"session.sales_channel\", \"session->table\".\"id\" AS \"session.table.id\", \"session->table\".\"table_number\" AS \"session.table.table_number\", \"session->table\".\"status\" AS \"session.table.status\", \"session->table\".\"table_type\" AS \"session.table.table_type\", \"session->payments\".\"id\" AS \"session.payments.id\", \"session->payments\".\"payment_value\" AS \"session.payments.payment_value\", \"session->payments\".\"payment_method_id\" AS \"session.payments.payment_method_id\", \"session->payments\".\"created_at\" AS \"session.payments.created_at\", \"session->payments->payment_method\".\"id\" AS \"session.payments.payment_method.id\", \"session->payments->payment_method\".\"name\" AS \"session.payments.payment_method.name\", \"session->payment_method\".\"id\" AS \"session.payment_method.id\", \"session->payment_method\".\"name\" AS \"session.payment_method.name\", \"session->ifood_restaurant\".\"id\" AS \"session.ifood_restaurant.id\", \"session->ifood_restaurant\".\"name\" AS \"session.ifood_restaurant.name\", \"session->motoboy\".\"id\" AS \"session.motoboy.id\", \"session->motoboy\".\"name\" AS \"session.motoboy.name\", \"session->motoboy\".\"phone\" AS \"session.motoboy.phone\", \"session->buyer_address\".\"id\" AS \"session.buyer_address.id\", \"session->buyer_address\".\"state\" AS \"session.buyer_address.state\", \"session->buyer_address\".\"city\" AS \"session.buyer_address.city\", \"session->buyer_address\".\"neighborhood\" AS \"session.buyer_address.neighborhood\", \"session->buyer_address\".\"street\" AS \"session.buyer_address.street\", \"session->buyer_address\".\"number\" AS \"session.buyer_address.number\", \"session->buyer_address\".\"complement\" AS \"session.buyer_address.complement\", \"session->buyer_address\".\"reference\" AS \"session.buyer_address.reference\", \"session->buyer_address\".\"zip_code\" AS \"session.buyer_address.zip_code\", \"session->buyer_address\".\"longitude\" AS \"session.buyer_address.longitude\", \"session->buyer_address\".\"latitude\" AS \"session.buyer_address.latitude\", \"order_baskets\".\"id\" AS \"order_baskets.id\", \"order_baskets\".\"order_status\" AS \"order_baskets.order_status\", \"order_baskets\".\"basket_id\" AS \"order_baskets.basket_id\", \"order_baskets\".\"total_price\" AS \"order_baskets.total_price\", \"order_baskets\".\"total_service_price\" AS \"order_baskets.total_service_price\", \"order_baskets\".\"start_time\" AS \"order_baskets.start_time\", \"order_baskets\".\"close_time\" AS \"order_baskets.close_time\", \"order_baskets\".\"canceled_at\" AS \"order_baskets.canceled_at\", \"order_baskets\".\"ifood_id\" AS \"order_baskets.ifood_id\", \"order_baskets\".\"schedule\" AS \"order_baskets.schedule\", \"order_baskets\".\"ifood_table\" AS \"order_baskets.ifood_table\", \"order_baskets\".\"command_table_number\" AS \"order_baskets.command_table_number\", \"order_baskets\".\"scheduled_to\" AS \"order_baskets.scheduled_to\", \"order_baskets\".\"neemo_id\" AS \"order_baskets.neemo_id\", \"order_baskets->waiter\".\"id\" AS \"order_baskets.waiter.id\", \"order_baskets->waiter\".\"name\" AS \"order_baskets.waiter.name\", \"waiter\".\"id\" AS \"waiter.id\", \"waiter\".\"name\" AS \"waiter.name\", \"waiter\".\"is_protected\" AS \"waiter.is_protected\", \"buyer\".\"id\" AS \"buyer.id\", \"buyer\".\"name\" AS \"buyer.name\", \"buyer\".\"phone\" AS \"buyer.phone\", \"buyer\".\"email\" AS \"buyer.email\", \"buyer\".\"ifood_phone\" AS \"buyer.ifood_phone\", \"buyer\".\"neemo_phone\" AS \"buyer.neemo_phone\", \"buyer\".\"localizer\" AS \"buyer.localizer\" FROM \"individual_bills\" AS \"IndividualBill\" LEFT OUTER JOIN \"clube_rescues\" AS \"rescues\" ON \"IndividualBill\".\"id\" = \"rescues\".\"individual_bill_id\" INNER JOIN \"table_sessions\" AS \"session\" ON \"IndividualBill\".\"session_id\" = \"session\".\"id\" AND (\"session\".\"created_at\" BETWEEN '2025-11-16 12:49:18.038 +00:00' AND '2025-11-26 12:49:18.038 +00:00' OR \"session\".\"scheduled_to\" >= '2025-11-16 12:49:18.038 +00:00') AND \"session\".\"restaurant_id\" = 302 AND \"session\".\"status\" NOT IN ('completed', 'transfer') LEFT OUTER JOIN \"place_tables\" AS \"session->table\" ON \"session\".\"table_id\" = \"session->table\".\"id\" LEFT OUTER JOIN \"payments\" AS \"session->payments\" ON \"session\".\"id\" = \"session->payments\".\"table_session_id\" LEFT OUTER JOIN \"payment_methods\" AS \"session->payments->payment_method\" ON \"session->payments\".\"payment_method_id\" = \"session->payments->payment_method\".\"id\" LEFT OUTER JOIN \"payment_methods\" AS \"session->payment_method\" ON \"session\".\"intended_payment_method_id\" = \"session->payment_method\".\"id\" LEFT OUTER JOIN \"ifood_restaurants\" AS \"session->ifood_restaurant\" ON \"session\".\"ifood_restaurant_id\" = \"session->ifood_restaurant\".\"id\" LEFT OUTER JOIN \"motoboys\" AS \"session->motoboy\" ON \"session\".\"motoboy_id\" = \"session->motoboy\".\"id\" LEFT OUTER JOIN \"buyer_delivery_addresses\" AS \"session->buyer_address\" ON \"session\".\"buyer_delivery_address_id\" = \"session->buyer_address\".\"id\" INNER JOIN \"order_baskets\" AS \"order_baskets\" ON \"IndividualBill\".\"id\" = \"order_baskets\".\"bill_id\" AND \"order_baskets\".\"order_status\" IN ('canceled_waiting_payment', 'ready', 'pending', 'delivered', 'accepted', 'ongoing', 'canceled') LEFT OUTER JOIN \"waiters\" AS \"order_baskets->waiter\" ON \"order_baskets\".\"waiter_id\" = \"order_baskets->waiter\".\"id\" LEFT OUTER JOIN \"waiters\" AS \"waiter\" ON \"IndividualBill\".\"waiter_id\" = \"waiter\".\"id\" LEFT OUTER JOIN \"buyers\" AS \"buyer\" ON \"IndividualBill\".\"buyer_id\" = \"buyer\".\"id\";
-  "
-  in*)
-  (*let input = "select a.*, b, c from (select * from t) as k inner join (select x, y from fears) as f on k.id = f.id;"
-  in*)
-  (*let input = "select distinct a from (today inner join tomorrow on a = b) where x not in (1, 2, 3)"
-  in*)
-  (*let input = "select a from restaurants where x = 2 and y = 4"
-  in*)
+let parser_test input =
   let ctx =
     { data = input
     ; pos = 0
@@ -1465,3 +1434,38 @@ let () =
   )
   | Error e -> Printf.printf "%s\n" e
 
+let parser_run input =
+  let ctx =
+    { data = input
+    ; pos = 0
+    ; line = 1
+    ; column = 1
+    ; start = 0
+    }
+  in
+  match tokenize ctx with
+  | Ok tokens -> (
+    let parser' =
+      { tokens = Array.of_list tokens
+      ; token_count = List.length tokens
+      ; pos = 0
+      }
+    in
+    match parser_select parser' with
+    | Error e -> Printf.printf "parse error %s\n" e
+    | Ok (p, s) ->
+      Printf.printf "\n";
+      format_select s 0;
+      Printf.printf "\n"
+  )
+  | Error e -> Printf.printf "%s\n" e
+
+let () =
+  let data = ref "" in
+  try
+    while true do
+      let line = input_line stdin in
+        data := !data ^ line ^ "\n"
+    done
+  with End_of_file ->
+      parser_run !data
