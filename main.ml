@@ -1,5 +1,3 @@
-(* TODO: Add support to function calls *)
-
 (* List *)
 let drop (n: int) (ls: 'a list): 'a list =
   let rec loop k l =
@@ -618,6 +616,7 @@ type expr_t =
   | BinOp of { op: token_type_t; lhs: expr_t; rhs: expr_t }
   | InList of { name: expr_t; op: token_type_t; values: expr_t list }
   | BetweenOp of { name: expr_t; op: token_type_t; first: expr_t; second: expr_t }
+  | FunctionCall of { name: token_type_t; params: expr_t list }
 
 type assign_t =
   { lhs: token_type_t
@@ -754,7 +753,7 @@ let parser_ident (p: parser_t): string parser_result_t =
       parser_unexpected_token token "2.. "
 
 let op_list =
-  [ Plus ; Minus ; Star ; Slash
+  [ Plus ; Minus ; Star; Slash
   ; Gt; Ge; Lt; Le; Equal
   ; And; Or
   ; Like; ILike
@@ -795,6 +794,46 @@ let rec parser_expr (p: parser_t): expr_t parser_result_t =
         Ok (p', expr)
     | None -> Ok (p', lhs)
   in
+  let parser_func_params (p: parser_t): (expr_t list) parser_result_t =
+    let rec loop p' result =
+      let token = parser_get_token p' in
+        match token.ttype with
+        | Star -> begin
+          let p' = parser_advance p' in
+          let expr = Value Star in
+          let result = expr :: result in
+            let token = parser_get_token p' in
+              match token.ttype with
+              | Comma -> loop (parser_advance p') result
+              | _ -> Ok (p', List.rev result)
+        end
+        | String _
+        | Number _
+        | Identifier _ -> begin
+          let* p', expr = parser_expr p' in
+          let result = expr :: result in
+          let token = parser_get_token p' in
+            match token.ttype with
+            | Comma -> loop (parser_advance p') result
+            | _ -> Ok (p', List.rev result)
+        end
+        | _ ->
+          parser_unexpected_token token "9.. "
+    in
+      loop p []
+  in
+  let parser_func_call_or_ident name p' =
+    let* p', opt = 
+      p' |> parser_optional (parser_expect OpenParen)
+    in
+    match opt with
+    | Some _ ->
+      let* p', params = parser_func_params p' in
+      let* p', _ = parser_expect CloseParen p' in
+      let fun_call = FunctionCall { name = name; params = params } in
+        Ok (p', fun_call)
+    | None -> Ok (p', Value name)
+  in
   let token = parser_get_token p in
     match token.ttype with
     | OpenParen -> 
@@ -805,7 +844,15 @@ let rec parser_expr (p: parser_t): expr_t parser_result_t =
       in
       let lhs = Parentheses expr in
         parser_operator_opt lhs op_opt p'
-    | String _ | Number _ | Identifier _ ->
+    | Identifier _ ->
+      let* p', func_or_ident =
+        (parser_advance p) |> parser_func_call_or_ident token.ttype
+      in
+      let* p', op_opt =
+        p' |> parser_optional (parser_expect_oneof op_list)
+      in
+        parser_operator_opt func_or_ident op_opt p'
+    | String _ | Number _ ->
       let* p', op_opt =
         (parser_advance p) |> parser_optional (parser_expect_oneof op_list)
       in
@@ -1068,152 +1115,9 @@ and parser_selectable p =
 
 let parser_select p =
   let* p, select_stmt = parser_single_select p in
-  let* p, _ = p |> parser_optional (parser_expect Comma) in
+  let* p, _ = p |> parser_optional (parser_expect Semi) in
     Ok (p, select_stmt)
 
-let rec print_expr expr depth =
-  if depth > 0 then (
-    Printf.printf "%s" (
-      List.init depth (fun _ -> " ")
-      |> List.fold_left (fun r v -> r ^ v) ""
-    )
-  );
-
-  match expr with
-  | Value tt ->
-    Printf.printf "%s\n" (sprint_token_type tt)
-  | Parentheses expr -> 
-    Printf.printf "()\n";
-    print_expr expr (depth + 2)
-  | BinOp binop ->
-    Printf.printf "%s\n" (sprint_token_type binop.op);
-    print_expr binop.lhs (depth + 2);
-    print_expr binop.rhs (depth + 2)
-  | InList l ->
-    Printf.printf "%s\n" (sprint_token_type l.op);
-    List.iter (fun v -> print_expr v (depth + 2)) l.values
-  | BetweenOp b ->
-    Printf.printf "%s\n" (sprint_token_type b.op);
-    print_expr b.name (depth + 2);
-    print_expr b.first (depth + 2);
-    print_expr b.second (depth + 2)
-
-let rec print_selectable (s: selectable_t) (depth: int): unit =
-  let depth_str = Printf.sprintf "%*s" depth "" in
-  match s with
-  | Table t -> (
-    match t.alias with
-    | Some alias ->
-      Printf.printf "%s" depth_str;
-      Printf.printf "table: %s as %s\n" t.name alias
-    | None ->
-      Printf.printf "%s" depth_str;
-      Printf.printf "table: %s\n" t.name
-  )
-  | Subselect s -> (
-    (match s.alias with
-    | Some alias ->
-      Printf.printf "%s" depth_str;
-      Printf.printf "from select as: %s\n" alias
-    | None ->
-      Printf.printf "%s" depth_str;
-      Printf.printf "from select without alias\n"
-    );
-    print_select s.select (depth + 2)
-  )
-  | Subjoin s -> (
-    Printf.printf "%s" depth_str;
-    Printf.printf "%s\n" (sprint_token_type (from_join_type s.join_type));
-    print_selectable s.lhs (depth + 2);
-    print_selectable s.rhs (depth + 2);
-    Printf.printf "%s" depth_str;
-    Printf.printf " on\n";
-    print_expr s.condition (depth + 2)
-  )
-and print_select (s: select_stmt_t) (depth: int): unit =
-  let depth_str = Printf.sprintf "%*s" depth ""
-  in
-
-  Printf.printf "%s" depth_str;
-  Printf.printf "select %s\n" (if s.distinct then "distinct" else "");
-
-  print_selectable s.table (depth + 2);
-
-  Printf.printf "%s" depth_str;
-  Printf.printf "fields:\n";
-  List.iter (
-    fun field ->
-      match field.alias with
-      | Some v ->
-        Printf.printf "%s" depth_str;
-        Printf.printf "  alias = %s:\n" v;
-        print_expr field.expr (depth + 4)
-      | None ->
-        print_expr field.expr (depth + 2)
-  )
-  s.fields;
-
-  List.iter (
-    fun v ->
-      Printf.printf "%s" depth_str;
-      Printf.printf "%s\n" (sprint_token_type (from_join_type v.join_type));
-
-      print_selectable v.table (depth + 2);
-      Printf.printf "%s" depth_str;
-      Printf.printf " on\n";
-      print_expr v.condition (depth + 2)
-  )
-  s.joins;
-
-  (match s.where with
-  | Some w ->
-    Printf.printf "%s" depth_str;
-    Printf.printf "where:\n";
-    print_expr w.expr (depth + 2)
-  | None -> ()
-  );
-
-  (match s.order_by with
-  | Some o ->
-    Printf.printf "%s" depth_str;
-    Printf.printf "order by:\n";
-    List.iter (
-      fun item ->
-        Printf.printf "%s" depth_str;
-        Printf.printf "  %s\n" (if item.ascending then "asc" else "desc");
-        print_expr item.expr (depth + 3)
-    )
-    o.items
-  | None -> ()
-  );
-
-  (match s.group_by with
-  | Some g -> (
-    Printf.printf "%s" depth_str;
-    Printf.printf "group by: %s\n" (join ", " (fun a -> a) g.names);
-    match g.having with
-    | Some e ->
-      Printf.printf "%s" depth_str;
-      Printf.printf "having:\n";
-      print_expr e (depth + 2)
-    | None -> ()
-  )
-  | None -> ()
-  );
-
-  (match s.limit with
-  | Some l ->
-    Printf.printf "%s" depth_str;
-    Printf.printf "limit: %s\n" (sprint_token_type l)
-  | None -> ()
-  );
-
-  match s.offset with
-  | Some o ->
-    Printf.printf "%s" depth_str;
-    Printf.printf "offset: %s\n" (sprint_token_type o)
-  | None -> ()
-  
 let rec format_expr expr depth align_pad =
   Printf.printf "%*s" depth "";
 
@@ -1263,13 +1167,30 @@ let rec format_expr expr depth align_pad =
       l.values;
 
     Printf.printf ")"
-  | BetweenOp b -> begin
+  | BetweenOp b ->
     format_expr b.name 0 0;
     Printf.printf " %s " (sprint_token_name_or_symbol b.op);
     format_expr b.first 0 0;
     Printf.printf " AND ";
     format_expr b.second 0 0
-  end
+  | FunctionCall fc ->
+    Printf.printf "%s" (sprint_token_name_or_symbol fc.name);
+    Printf.printf "(";
+
+    let first = ref true in
+    List.iter
+      (fun v ->
+        if !first then (
+          first := false;
+          format_expr v 0 0
+        ) else (
+          Printf.printf ",";
+          format_expr v 0 0
+        )
+      )
+      fc.params;
+
+    Printf.printf ")"
   | _ -> failwith "format expr unreachable(2)"
 
 let rec format_selectable (s: selectable_t) (depth: int): unit =
@@ -1405,35 +1326,6 @@ and format_select (s: select_stmt_t) (depth: int): unit =
     Printf.printf "OFFSET %s\n" (sprint_token_name_or_symbol o)
   | None -> ()
 
-let parser_test input =
-  let ctx =
-    { data = input
-    ; pos = 0
-    ; line = 1
-    ; column = 1
-    ; start = 0
-    }
-  in
-  match tokenize ctx with
-  | Ok tokens -> (
-    (*List.iter print_token tokens;*)
-    let parser' =
-      { tokens = Array.of_list tokens
-      ; token_count = List.length tokens
-      ; pos = 0
-      }
-    in
-    match parser_select parser' with
-    | Error e -> Printf.printf "parse error %s\n" e
-    | Ok (p, s) ->
-      Printf.printf "parse ok\n";
-      print_select s 0;
-      Printf.printf "\n------\n\n";
-      format_select s 0;
-      Printf.printf "\n"
-  )
-  | Error e -> Printf.printf "%s\n" e
-
 let parser_run input =
   let ctx =
     { data = input
@@ -1445,6 +1337,7 @@ let parser_run input =
   in
   match tokenize ctx with
   | Ok tokens -> (
+    (*List.iter print_token tokens;*)
     let parser' =
       { tokens = Array.of_list tokens
       ; token_count = List.length tokens
